@@ -21,6 +21,8 @@ use flume::{Receiver, Sender};
 use futures::{channel::oneshot, Future};
 use monoio::{FusionDriver, RuntimeBuilder};
 
+use crate::*;
+
 /// a boxed function that spawns task in current monoio runtime
 type TaskSpawner = Box<dyn FnOnce() + Send>;
 
@@ -130,6 +132,59 @@ impl MonoiofsCore {
             }
         }
         unreachable!("this method should panic")
+    }
+}
+
+/// SAFETY: When [`Buffer`] is owned by monoio runtime, [`Buffer::current`]
+/// always returns the same [`bytes::Bytes`], which points to a chunk of
+/// contiguous readonly memory that never moves.
+unsafe impl monoio::buf::IoBuf for Buffer {
+    fn read_ptr(&self) -> *const u8 {
+        self.current().read_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.current().bytes_init()
+    }
+}
+
+/// An intermediate struct that can be converted from [`Buffer`] and
+/// implements [`monoio::buf::IoVecBuf`]. It stores a [`Vec`] of
+/// [`libc::iovec`] to make sure address of the iovec array is fixed
+/// when owned by monoio runtime.
+#[cfg(unix)]
+#[derive(Clone)]
+struct IoVecBuffer {
+    /// Points to memory chunks that `_buf` references to.
+    iovecs: Vec<libc::iovec>,
+    _buf: Buffer,
+}
+
+#[cfg(unix)]
+impl From<Buffer> for IoVecBuffer {
+    fn from(buffer: Buffer) -> Self {
+        let vec_io_slice = buffer.to_io_slice();
+        let iovecs = vec_io_slice
+            .into_iter()
+            .map(|io_slice| libc::iovec {
+                iov_base: io_slice.as_ptr() as _,
+                iov_len: io_slice.len()
+            })
+            .collect();
+        IoVecBuffer { iovecs, _buf: buffer }
+    }
+}
+
+/// SAFETY: When [`IoVecBuffer`] is owned by monoio runtime,
+/// [`IoVecBuffer::_buf`] is always valid and [`IoVecBuffer::iovecs`] always
+/// points to a fixed array of valid iovecs.
+unsafe impl monoio::buf::IoVecBuf for IoVecBuffer {
+    fn read_iovec_ptr(&self) -> *const libc::iovec {
+        self.iovecs.as_ptr() as _
+    }
+
+    fn read_iovec_len(&self) -> usize {
+        self.iovecs.len()
     }
 }
 

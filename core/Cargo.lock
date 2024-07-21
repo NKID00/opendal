@@ -4809,6 +4809,7 @@ dependencies = [
  "hmac",
  "hrana-client-proto",
  "http 1.1.0",
+ "libc",
  "libtest-mimic",
  "log",
  "md-5",
